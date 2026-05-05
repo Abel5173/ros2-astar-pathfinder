@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>perception_pkg</name>
+  <version>1.0.0</version>
+  <description>ROS 2 perception pipeline with YOLOv8 object detection</description>
+  <maintainer email="your.email@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- Core ROS 2 dependencies -->
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>cv_bridge</depend>
+  
+  <!-- Build and execution dependencies -->
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pip</exec_depend>
+  
+  <!-- Launch and configuration -->
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

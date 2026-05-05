@@ -1,0 +1,26 @@
+/**:
+  ros__parameters:
+    # Input/Output Topics
+    input_topic: "/camera/image_raw"
+    depth_topic: "/camera/depth/image_raw"
+    camera_info_topic: "/camera/camera_info"
+    detection_topic: "/camera/detections"
+    visualization_topic: "/camera/detections/visualization"
+    
+    # Model Configuration
+    model_path: "yolov8n.pt"  # Options: yolov8n.pt, yolov8s.pt, yolov8m.pt, yolov8l.pt, yolov8x.pt
+    confidence_threshold: 0.5
+    nms_threshold: 0.45
+    inference_size: 640
+    
+    # Feature Flags
+    enable_depth: true
+    publish_visualization: true
+    use_compressed: false
+    
+    # Target Classes (empty = all COCO classes)
+    # Examples:
+    # target_classes: ["person", "car", "dog", "cat"]
+    # target_classes: ["bottle", "cup", "cell phone"]
+    # Note: Empty list must be set explicitly, not left undefined (ROS2 type inference issue)
+    target_classes: []
