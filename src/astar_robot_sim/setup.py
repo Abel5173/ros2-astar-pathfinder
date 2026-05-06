@@ -16,16 +16,20 @@ setup(
             glob('launch/*.py')),
         (os.path.join('share', package_name, 'worlds'),
             glob('worlds/*.world')),
+        (os.path.join('share', package_name, 'config'),
+            glob('config/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='abel',
     maintainer_email='abel@todo.todo',
-    description='A* path planning simulation',
+    description='A* and D* Lite path planning simulation',
     license='MIT',
     entry_points={
         'console_scripts': [
             'astar_planner = astar_robot_sim.astar_planner:main',
+            'dstar_lite_planner = astar_robot_sim.dstar_lite_planner:main',
+            'robot_controller = astar_robot_sim.robot_controller:main',
         ],
     },
 )
