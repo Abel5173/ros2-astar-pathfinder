@@ -53,4 +53,60 @@
     <axis xyz="0 0 1"/>
   </joint>
 
+  <!-- LiDAR link -->
+  <link name="lidar_link">
+    <visual>
+      <geometry><cylinder radius="0.05" length="0.04"/></geometry>
+    </visual>
+  </link>
+
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0.1 0 0.07"/>
+  </joint>
+
+  <!-- Differential drive plugin -->
+  <gazebo>
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.34</wheel_separation>
+      <wheel_diameter>0.16</wheel_diameter>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <ros>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+      </ros>
+    </plugin>
+  </gazebo>
+
+  <!-- LiDAR sensor plugin -->
+  <gazebo reference="lidar_link">
+    <sensor name="lidar" type="ray">
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>3.5</max>
+        </range>
+      </ray>
+      <plugin name="laser" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>lidar_link</frame_name>
+      </plugin>
+      <always_on>true</always_on>
+      <update_rate>10</update_rate>
+    </sensor>
+  </gazebo>
+
 </robot>
