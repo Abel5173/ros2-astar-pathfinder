@@ -41,8 +41,8 @@ class DStarLitePlanner(Node):
 
         self.obstacle_added = False  # flag — only add once
 
-        self.create_timer(2.0, self.republish)
-        self.create_timer(8.0, self.add_dynamic_obstacle)
+        self.create_timer(1.0, self.republish)
+        self.create_timer(2.0, self.add_dynamic_obstacle)
 
     def build_house_obstacles(self):
         for i in range(40):
@@ -175,10 +175,23 @@ class DStarLitePlanner(Node):
         else:
             self.get_logger().warn('D* Lite: Replan failed!')
 
-    def republish(self):
+    """def republish(self):
         self.publish_grid()
         if self.path:
+            self.publish_path(self.path)"""
+
+    def republish(self):
+        # Only publish if we have a valid position
+        if not self.odom_received:
+            return
+        
+        self.publish_grid()
+    
+        # Only publish path if one actually exists
+        if self.path:
             self.publish_path(self.path)
+        
+        self.publish_goal()
 
     def publish_path(self, path):
         msg = Path()
