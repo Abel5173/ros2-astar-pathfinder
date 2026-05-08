@@ -10,6 +10,8 @@ class RobotController(Node):
     def __init__(self):
         super().__init__('robot_controller')
         self.get_logger().info('Robot Controller started!')
+        self.declare_parameter('path_topic', '/astar_path')
+        path_topic = self.get_parameter('path_topic').get_parameter_value().string_value
 
         self.path          = []
         self.current_idx   = 0
@@ -17,15 +19,17 @@ class RobotController(Node):
         self.robot_y       = 0.0
         self.robot_yaw     = 0.0
         self.moving        = False
-        self.path_received = False
         self.stuck_counter = 0
         self.last_x        = 0.0
         self.last_y        = 0.0
+        self.reached_goal  = False
 
         self.create_subscription(
-            Path, '/astar_path', self.path_callback, 10)
+            Path, path_topic, self.path_callback, 10)
         self.create_subscription(
             Odometry, '/odom', self.odom_callback, 10)
+
+        self.get_logger().info(f'Listening for paths on: {path_topic}')
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_timer(0.1, self.control_loop)
@@ -33,19 +37,21 @@ class RobotController(Node):
         self.create_timer(3.0, self.stuck_check)
 
     def path_callback(self, msg):
-        if self.path_received:
+        if len(msg.poses) == 0:
             return
-        if len(msg.poses) > 0:
-            # Take every 6th waypoint — less zigzagging, smoother path
-            self.path = msg.poses[::6]
-            # Always include the final goal
-            if msg.poses[-1] not in self.path:
-                self.path.append(msg.poses[-1])
-            self.current_idx   = 0
-            self.moving        = True
-            self.path_received = True
-            self.get_logger().info(
-                f'Path received! Navigating {len(self.path)} waypoints...')
+
+        # Always accept the latest replanned path (A* replans on odom/scan/goal).
+        # Downsample to reduce jitter but keep final goal.
+        new_path = msg.poses[::4]
+        if msg.poses[-1] not in new_path:
+            new_path.append(msg.poses[-1])
+
+        self.path = new_path
+        self.current_idx = 0
+        self.moving = True
+        self.reached_goal = False
+        self.get_logger().info(
+            f'Updated path received: {len(self.path)} waypoints.')
 
     def odom_callback(self, msg):
         self.robot_x = msg.pose.pose.position.x
@@ -66,9 +72,12 @@ class RobotController(Node):
             self.get_logger().warn(
                 f'Robot may be stuck! (count={self.stuck_counter})')
             if self.stuck_counter >= 2:
-                # Skip to next waypoint
-                self.get_logger().warn('Skipping to next waypoint...')
-                self.current_idx  += 1
+                # Stop and wait for planner's next update instead of blindly
+                # skipping waypoints, which can push the robot into walls.
+                self.get_logger().warn('Pausing for replan...')
+                self.moving = False
+                stop_cmd = Twist()
+                self.cmd_pub.publish(stop_cmd)
                 self.stuck_counter = 0
         else:
             self.stuck_counter = 0
@@ -98,6 +107,7 @@ class RobotController(Node):
             if self.current_idx >= len(self.path):
                 self.get_logger().info('Goal reached! Robot stopped.')
                 self.moving       = False
+                self.reached_goal = True
                 cmd.linear.x      = 0.0
                 cmd.angular.z     = 0.0
         else:

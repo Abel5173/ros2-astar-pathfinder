@@ -35,6 +35,7 @@ class AStarPlanner(Node):
         # Dynamic obstacles detected by LiDAR — separate from static map walls
         # so we can clear them between scans without erasing the house layout
         self.dynamic_obstacles = set()
+        self.dynamic_inflation_cells = 1
 
         self.path_pub = self.create_publisher(Path,          '/astar_path',     10)
         self.grid_pub = self.create_publisher(OccupancyGrid, '/occupancy_grid',  10)
@@ -117,11 +118,12 @@ class AStarPlanner(Node):
 
         angle = msg.angle_min
         for r in msg.ranges:
-            angle += msg.angle_increment
             # Skip invalid / out-of-range readings
             if math.isnan(r) or math.isinf(r):
+                angle += msg.angle_increment
                 continue
             if r < msg.range_min or r > msg.range_max:
+                angle += msg.angle_increment
                 continue
 
             # Hit point in world frame (laser frame ≈ robot frame for a
@@ -129,15 +131,25 @@ class AStarPlanner(Node):
             hit_x = self.robot_x + r * math.cos(self.robot_yaw + angle)
             hit_y = self.robot_y + r * math.sin(self.robot_yaw + angle)
 
-            cell = self.world_to_grid(hit_x, hit_y)
+            cell_r, cell_c = self.world_to_grid(hit_x, hit_y)
 
-            # Never mark the robot's own cell or the goal as an obstacle
-            if self.last_start and cell == self.last_start:
-                continue
-            if cell == self.goal:
-                continue
+            # Inflate each scan hit by one cell so the path keeps safer
+            # clearance from walls and newly detected obstacles.
+            for dr in range(-self.dynamic_inflation_cells, self.dynamic_inflation_cells + 1):
+                for dc in range(-self.dynamic_inflation_cells, self.dynamic_inflation_cells + 1):
+                    rr = cell_r + dr
+                    cc = cell_c + dc
+                    if not (0 <= rr < self.grid_height and 0 <= cc < self.grid_width):
+                        continue
+                    cell = (rr, cc)
+                    # Never mark the robot's own cell or the goal as an obstacle
+                    if self.last_start and cell == self.last_start:
+                        continue
+                    if cell == self.goal:
+                        continue
+                    new_dynamic.add(cell)
 
-            new_dynamic.add(cell)
+            angle += msg.angle_increment
 
         if new_dynamic == self.dynamic_obstacles:
             return  # nothing changed — skip replan

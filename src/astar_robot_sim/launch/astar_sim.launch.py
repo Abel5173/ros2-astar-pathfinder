@@ -1,8 +1,11 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
 from launch.actions import IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 def generate_launch_description():
@@ -12,11 +15,17 @@ def generate_launch_description():
 
     world_file = os.path.join(pkg_sim,  'worlds', 'grid_world.world')
     urdf_file  = os.path.join(pkg_desc, 'urdf',   'astar_robot.urdf')
+    planner = LaunchConfiguration('planner')
 
     with open(urdf_file, 'r') as f:
         robot_desc = f.read()
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'planner',
+            default_value='astar',
+            description='Planner to use: astar or dstar'
+        ),
 
         # Launch Gazebo with our world
         IncludeLaunchDescription(
@@ -59,6 +68,16 @@ def generate_launch_description():
             executable='astar_planner',
             name='astar_planner',
             output='screen',
+            condition=IfCondition(PythonExpression(["'", planner, "' == 'astar'"])),
+        ),
+
+        # D* Lite planner node
+        Node(
+            package='astar_robot_sim',
+            executable='dstar_lite_planner',
+            name='dstar_lite_planner',
+            output='screen',
+            condition=IfCondition(PythonExpression(["'", planner, "' == 'dstar'"])),
         ),
 
         # RViz2

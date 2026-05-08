@@ -1,48 +1,51 @@
 #!/usr/bin/env python3
+import math
 import rclpy
 from rclpy.node import Node
-import math
-from nav_msgs.msg import OccupancyGrid, Path
+from nav_msgs.msg import OccupancyGrid, Path, Odometry
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import LaserScan
+
 
 class DStarLitePlanner(Node):
     def __init__(self):
         super().__init__('dstar_lite_planner')
         self.get_logger().info('D* Lite Planner Node started!')
 
-        self.grid_width  = 40
+        self.grid_width = 40
         self.grid_height = 40
-        self.resolution  = 0.25
+        self.resolution = 0.25
+        self.origin = -5.0
 
         self.obstacles = set()
         self.build_house_obstacles()
+        self.dynamic_obstacles = set()
+        self.dynamic_inflation_cells = 1
+
+        self.robot_x = 0.0
+        self.robot_y = 0.0
+        self.robot_yaw = 0.0
+        self.odom_received = False
+        self.last_start = None
 
         self.start = (2, 2)
-        self.goal  = (37, 37)
+        self.goal = (35, 35)
+        self.path = []
 
-        self.g   = {}
+        self.g = {}
         self.rhs = {}
-        self.U   = {}
-        self.km  = 0.0
+        self.U = {}
+        self.km = 0.0
 
         self.path_pub = self.create_publisher(Path, '/dstar_path', 10)
         self.grid_pub = self.create_publisher(OccupancyGrid, '/dstar_grid', 10)
+        self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
 
-        self.initialize()
-        self.compute_shortest_path()
-        self.path = self.extract_path()
-
-        if self.path:
-            self.get_logger().info(
-                f'D* Lite initial path: {len(self.path)-1} steps.')
-        else:
-            self.get_logger().warn('D* Lite: No initial path found!')
-            self.path = []
-
-        self.obstacle_added = False  # flag — only add once
+        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
 
         self.create_timer(1.0, self.republish)
-        self.create_timer(2.0, self.add_dynamic_obstacle)
 
     def build_house_obstacles(self):
         for i in range(40):
@@ -59,8 +62,88 @@ class DStarLitePlanner(Node):
         for i in [7,  8,  9 ]: self.obstacles.discard((i, 20))
         for i in [27, 28, 29]: self.obstacles.discard((i, 25))
 
+    def world_to_grid(self, x, y):
+        col = int(round((x - self.origin) / self.resolution))
+        row = int(round((y - self.origin) / self.resolution))
+        col = max(0, min(self.grid_width - 1, col))
+        row = max(0, min(self.grid_height - 1, row))
+        return (row, col)
+
+    def grid_to_world(self, row, col):
+        x = float(col) * self.resolution + self.origin
+        y = float(row) * self.resolution + self.origin
+        return x, y
+
+    def odom_callback(self, msg):
+        self.robot_x = msg.pose.pose.position.x
+        self.robot_y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+        self.robot_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        if not self.odom_received:
+            self.odom_received = True
+            self.get_logger().info(
+                f'First odom received: world ({self.robot_x:.2f}, {self.robot_y:.2f})')
+
+        new_start = self.world_to_grid(self.robot_x, self.robot_y)
+        if new_start != self.last_start:
+            self.last_start = new_start
+            self._replan(new_start, self.goal)
+
+    def goal_callback(self, msg):
+        new_goal = self.world_to_grid(msg.pose.position.x, msg.pose.position.y)
+        if new_goal == self.goal:
+            return
+        self.goal = new_goal
+        self.get_logger().info(
+            f'New goal received: world ({msg.pose.position.x:.2f}, '
+            f'{msg.pose.position.y:.2f}) -> grid {self.goal}')
+        if self.last_start is not None:
+            self._replan(self.last_start, self.goal)
+
+    def scan_callback(self, msg):
+        new_dynamic = set()
+        angle = msg.angle_min
+        for r in msg.ranges:
+            if math.isnan(r) or math.isinf(r):
+                angle += msg.angle_increment
+                continue
+            if r < msg.range_min or r > msg.range_max:
+                angle += msg.angle_increment
+                continue
+
+            hit_x = self.robot_x + r * math.cos(self.robot_yaw + angle)
+            hit_y = self.robot_y + r * math.sin(self.robot_yaw + angle)
+            cell_r, cell_c = self.world_to_grid(hit_x, hit_y)
+
+            for dr in range(-self.dynamic_inflation_cells, self.dynamic_inflation_cells + 1):
+                for dc in range(-self.dynamic_inflation_cells, self.dynamic_inflation_cells + 1):
+                    rr = cell_r + dr
+                    cc = cell_c + dc
+                    if not (0 <= rr < self.grid_height and 0 <= cc < self.grid_width):
+                        continue
+                    cell = (rr, cc)
+                    if self.last_start and cell == self.last_start:
+                        continue
+                    if cell == self.goal:
+                        continue
+                    new_dynamic.add(cell)
+
+            angle += msg.angle_increment
+
+        if new_dynamic == self.dynamic_obstacles:
+            return
+
+        self.obstacles -= self.dynamic_obstacles
+        self.dynamic_obstacles = new_dynamic
+        self.obstacles |= self.dynamic_obstacles
+        if self.last_start is not None:
+            self._replan(self.last_start, self.goal)
+
     def h(self, a, b):
-        return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
     def g_val(self, s):
         return self.g.get(s, float('inf'))
@@ -152,45 +235,34 @@ class DStarLitePlanner(Node):
             cur = best_nb
         return path if cur == self.goal else None
 
-    def add_dynamic_obstacle(self):
-        if self.obstacle_added:
-            return                          # only run once
-        self.obstacle_added = True
-        self.get_logger().info(
-            'D* Lite: New obstacle detected! Replanning...')
-        new_obs = [(10,10),(11,10),(12,10),(13,10),(14,10)]
-        for obs in new_obs:
-            self.obstacles.add(obs)
-            self.g[obs]   = float('inf')
-            self.rhs[obs] = float('inf')
-            for nb, _ in self.neighbors(obs):
-                self.update_vertex(nb)
-        self.km += self.h(self.start, self.start)
+    def _replan(self, start, goal):
+        if start in self.obstacles:
+            self.get_logger().warn(
+                f'Start cell {start} is inside an obstacle - skipping replan.')
+            return
+        if goal in self.obstacles:
+            self.get_logger().warn(
+                f'Goal cell {goal} is inside an obstacle - skipping replan.')
+            return
+
+        self.start = start
+        self.goal = goal
+        self.initialize()
         self.compute_shortest_path()
         new_path = self.extract_path()
         if new_path:
             self.path = new_path
             self.get_logger().info(
-                f'D* Lite: Replanned! New path: {len(new_path)-1} steps.')
+                f'D* Lite replanned: {start} -> {goal} ({len(new_path)-1} steps)')
+            self.publish_path(self.path)
         else:
-            self.get_logger().warn('D* Lite: Replan failed!')
-
-    """def republish(self):
-        self.publish_grid()
-        if self.path:
-            self.publish_path(self.path)"""
+            self.get_logger().warn(
+                f'D* Lite: No path found from {start} to {goal}')
 
     def republish(self):
-        # Only publish if we have a valid position
-        if not self.odom_received:
-            return
-        
         self.publish_grid()
-    
-        # Only publish path if one actually exists
         if self.path:
             self.publish_path(self.path)
-        
         self.publish_goal()
 
     def publish_path(self, path):
@@ -200,8 +272,9 @@ class DStarLitePlanner(Node):
         for (r, c) in path:
             ps = PoseStamped()
             ps.header.frame_id    = 'map'
-            ps.pose.position.x    = float(c) * self.resolution - 5.0
-            ps.pose.position.y    = float(r) * self.resolution - 5.0
+            x, y = self.grid_to_world(r, c)
+            ps.pose.position.x    = x
+            ps.pose.position.y    = y
             ps.pose.orientation.w = 1.0
             msg.poses.append(ps)
         self.path_pub.publish(msg)
@@ -213,13 +286,23 @@ class DStarLitePlanner(Node):
         msg.info.resolution        = self.resolution
         msg.info.width             = self.grid_width
         msg.info.height            = self.grid_height
-        msg.info.origin.position.x = -5.0
-        msg.info.origin.position.y = -5.0
+        msg.info.origin.position.x = self.origin
+        msg.info.origin.position.y = self.origin
         msg.data = [0] * (self.grid_width * self.grid_height)
         for (r, c) in self.obstacles:
             if 0 <= r < self.grid_height and 0 <= c < self.grid_width:
                 msg.data[r * self.grid_width + c] = 100
         self.grid_pub.publish(msg)
+
+    def publish_goal(self):
+        msg = PoseStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        x, y = self.grid_to_world(self.goal[0], self.goal[1])
+        msg.pose.position.x = x
+        msg.pose.position.y = y
+        msg.pose.orientation.w = 1.0
+        self.goal_pub.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)
