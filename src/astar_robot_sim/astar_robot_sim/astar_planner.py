@@ -6,6 +6,7 @@ from nav_msgs.msg import OccupancyGrid, Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import LaserScan
 
+
 class AStarPlanner(Node):
     def __init__(self):
         super().__init__('astar_planner')
@@ -14,48 +15,40 @@ class AStarPlanner(Node):
         self.grid_width  = 40
         self.grid_height = 40
         self.resolution  = 0.25
-        # World origin offset: grid cell (r,c) → world (x,y) = (c*res + origin, r*res + origin)
         self.origin      = -5.0
 
         self.obstacles = set()
         self.build_house_obstacles()
+        # Frozen copy of static walls — used to ignore LiDAR hits on known walls
+        self.static_obstacles = frozenset(self.obstacles)
 
-        # Real robot position in world coords (updated from /odom)
         self.robot_x   = 0.0
         self.robot_y   = 0.0
+        self.robot_yaw = 0.0
         self.odom_received = False
 
-        # Goal in grid coords (updated from /goal_pose, default = far corner)
-        self.goal = (35, 35)
+        self.goal       = (35, 35)
+        self.path       = []
+        self.last_start = None
 
-        # Current planned path — replanned whenever start or goal changes
-        self.path = []
-        self.last_start = None   # track to avoid replanning on every odom tick
-
-        # Dynamic obstacles detected by LiDAR — separate from static map walls
-        # so we can clear them between scans without erasing the house layout
+        # Dynamic obstacles — only truly new obstacles not in the static map
         self.dynamic_obstacles = set()
-        self.dynamic_inflation_cells = 1
 
-        self.path_pub = self.create_publisher(Path,          '/astar_path',     10)
-        self.grid_pub = self.create_publisher(OccupancyGrid, '/occupancy_grid',  10)
-        self.goal_pub = self.create_publisher(PoseStamped,   '/goal_pose',       10)
+        self.path_pub = self.create_publisher(Path,          '/astar_path',    10)
+        self.grid_pub = self.create_publisher(OccupancyGrid, '/occupancy_grid', 10)
+        self.goal_pub = self.create_publisher(PoseStamped,   '/goal_pose',      10)
 
-        # Subscribe to real odometry for live start position
-        self.create_subscription(Odometry,    '/odom',      self.odom_callback,  10)
-        # Accept external goal commands (e.g. from RViz "2D Nav Goal" or another node)
-        self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback,  10)
-        # Convert LiDAR hits into dynamic obstacle cells
-        self.create_subscription(LaserScan,   '/scan',      self.scan_callback,  10)
+        self.create_subscription(Odometry,    '/odom',       self.odom_callback, 10)
+        self.create_subscription(PoseStamped, '/goal_pose',  self.goal_callback, 10)
+        self.create_subscription(LaserScan,   '/scan',       self.scan_callback, 10)
 
-        # Republish grid + path at 2 Hz so RViz stays current
-        self.create_timer(2.0, self.republish)
+        # Republish grid + path at 1 Hz
+        self.create_timer(1.0, self.republish)
 
     # ------------------------------------------------------------------
     # Coordinate helpers
     # ------------------------------------------------------------------
     def world_to_grid(self, x, y):
-        """Convert world (x, y) metres → grid (row, col), clamped to bounds."""
         col = int(round((x - self.origin) / self.resolution))
         row = int(round((y - self.origin) / self.resolution))
         col = max(0, min(self.grid_width  - 1, col))
@@ -63,7 +56,6 @@ class AStarPlanner(Node):
         return (row, col)
 
     def grid_to_world(self, row, col):
-        """Convert grid (row, col) → world (x, y) metres."""
         x = float(col) * self.resolution + self.origin
         y = float(row) * self.resolution + self.origin
         return x, y
@@ -75,7 +67,6 @@ class AStarPlanner(Node):
         self.robot_x = msg.pose.pose.position.x
         self.robot_y = msg.pose.pose.position.y
 
-        # Extract Yaw from Quaternion
         q = msg.pose.pose.orientation
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
@@ -88,7 +79,7 @@ class AStarPlanner(Node):
 
         new_start = self.world_to_grid(self.robot_x, self.robot_y)
 
-        # Only replan when the robot has moved to a different grid cell
+        # Only replan when the robot moves to a different grid cell
         if new_start != self.last_start:
             self.last_start = new_start
             self._replan(new_start, self.goal)
@@ -110,83 +101,63 @@ class AStarPlanner(Node):
 
     def scan_callback(self, msg):
         """
-        Project each valid laser ray into a world hit point, convert to a
-        grid cell, and add it to dynamic_obstacles.  Replans only when the
-        set of dynamic obstacles actually changes so we don't thrash A*.
+        Only add dynamic obstacles for objects that are:
+          1. Very close (< 0.8 m) — far hits are just the static walls
+          2. NOT already in the static map
+          3. Actually blocking the current planned path
+
+        Only replan when a new obstacle intersects the current path.
+        This prevents constant replanning from LiDAR noise on static walls.
         """
         new_dynamic = set()
 
         angle = msg.angle_min
         for r in msg.ranges:
-            # Skip invalid / out-of-range readings
+            angle += msg.angle_increment
             if math.isnan(r) or math.isinf(r):
-                angle += msg.angle_increment
                 continue
-            if r < msg.range_min or r > msg.range_max:
-                angle += msg.angle_increment
+            if r < msg.range_min or r > 0.8:   # only very close hits
                 continue
 
-            # Hit point in world frame (laser frame ≈ robot frame for a
-            # fixed lidar_joint, robot yaw comes from odom)
             hit_x = self.robot_x + r * math.cos(self.robot_yaw + angle)
             hit_y = self.robot_y + r * math.sin(self.robot_yaw + angle)
+            cell  = self.world_to_grid(hit_x, hit_y)
 
-            cell_r, cell_c = self.world_to_grid(hit_x, hit_y)
+            # Skip static walls — they're already in the map
+            if cell in self.static_obstacles:
+                continue
+            # Never block the robot's own cell or the goal
+            if self.last_start and cell == self.last_start:
+                continue
+            if cell == self.goal:
+                continue
 
-            # Inflate each scan hit by one cell so the path keeps safer
-            # clearance from walls and newly detected obstacles.
-            for dr in range(-self.dynamic_inflation_cells, self.dynamic_inflation_cells + 1):
-                for dc in range(-self.dynamic_inflation_cells, self.dynamic_inflation_cells + 1):
-                    rr = cell_r + dr
-                    cc = cell_c + dc
-                    if not (0 <= rr < self.grid_height and 0 <= cc < self.grid_width):
-                        continue
-                    cell = (rr, cc)
-                    # Never mark the robot's own cell or the goal as an obstacle
-                    if self.last_start and cell == self.last_start:
-                        continue
-                    if cell == self.goal:
-                        continue
-                    new_dynamic.add(cell)
-
-            angle += msg.angle_increment
+            new_dynamic.add(cell)
 
         if new_dynamic == self.dynamic_obstacles:
-            return  # nothing changed — skip replan
+            return  # nothing changed
 
-        # Merge: remove old dynamic cells from obstacles, add new ones
+        # Check if any changed obstacle actually intersects the current path
+        path_cells    = set(self.path) if self.path else set()
+        new_cells     = new_dynamic - self.dynamic_obstacles
+        removed_cells = self.dynamic_obstacles - new_dynamic
+
+        path_blocked = bool(new_cells     & path_cells)
+        path_cleared = bool(removed_cells & path_cells)
+
+        # Update obstacle set
         self.obstacles -= self.dynamic_obstacles
         self.dynamic_obstacles = new_dynamic
         self.obstacles |= self.dynamic_obstacles
 
-        # Replan from current position if we have one
-        if self.last_start is not None:
+        # Only replan if the path is actually affected
+        if (path_blocked or path_cleared) and self.last_start is not None:
+            self.get_logger().info('Dynamic obstacle changed path — replanning.')
             self._replan(self.last_start, self.goal)
 
     # ------------------------------------------------------------------
     # Planning
     # ------------------------------------------------------------------
-    def _replan(self, start, goal):
-        """Run A* from current grid start to goal and publish the result."""
-        if start in self.obstacles:
-            self.get_logger().warn(
-                f'Start cell {start} is inside an obstacle — skipping replan.')
-            return
-        if goal in self.obstacles:
-            self.get_logger().warn(
-                f'Goal cell {goal} is inside an obstacle — skipping replan.')
-            return
-
-        path = self.astar(start, goal)
-        if path:
-            self.path = path
-            self.get_logger().info(
-                f'Replanned: {start} → {goal}  ({len(path)-1} steps)')
-            self.publish_path(self.path)
-        else:
-            self.get_logger().warn(
-                f'No path found from {start} to {goal}')
-
     def build_house_obstacles(self):
         # Outer walls
         for i in range(40):
@@ -228,15 +199,15 @@ class AStarPlanner(Node):
                     cur = came_from[cur]
                 path.append(start)
                 return list(reversed(path))
-            for dr, dc in [(0,1),(0,-1),(1,0),(-1,0),
-                           (1,1),(1,-1),(-1,1),(-1,-1)]:
-                nb = (cur[0]+dr, cur[1]+dc)
+            for dr, dc in [(0, 1), (0, -1), (1, 0), (-1, 0),
+                           (1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                nb = (cur[0] + dr, cur[1] + dc)
                 if not (0 <= nb[0] < self.grid_height and
-                        0 <= nb[1] < self.grid_width): 
+                        0 <= nb[1] < self.grid_width):
                     continue
                 if nb in self.obstacles:
                     continue
-                cost = math.sqrt(2) if dr != 0 and dc != 0 else 1.0
+                cost = math.sqrt(2) if (dr != 0 and dc != 0) else 1.0
                 tg = g[cur] + cost
                 if tg < g.get(nb, float('inf')):
                     came_from[nb] = cur
@@ -244,6 +215,26 @@ class AStarPlanner(Node):
                     heapq.heappush(heap,
                         (tg + self.heuristic(nb, goal), nb))
         return None
+
+    def _replan(self, start, goal):
+        if start in self.obstacles:
+            self.get_logger().warn(
+                f'Start cell {start} is inside an obstacle — skipping replan.')
+            return
+        if goal in self.obstacles:
+            self.get_logger().warn(
+                f'Goal cell {goal} is inside an obstacle — skipping replan.')
+            return
+
+        path = self.astar(start, goal)
+        if path:
+            self.path = path
+            self.get_logger().info(
+                f'Replanned: {start} → {goal}  ({len(path)-1} steps)')
+            self.publish_path(self.path)
+        else:
+            self.get_logger().warn(
+                f'No path found from {start} to {goal}')
 
     # ------------------------------------------------------------------
     # Publishers
@@ -294,6 +285,7 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
