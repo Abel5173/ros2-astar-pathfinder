@@ -36,7 +36,7 @@ class RobotController(Node):
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_timer(0.1, self.control_loop)
-        # Check if stuck every 2 seconds (faster recovery than before)
+        # Check if stuck every 2 seconds
         self.create_timer(2.0, self.stuck_check)
 
     # ------------------------------------------------------------------
@@ -50,8 +50,22 @@ class RobotController(Node):
 
         new_path = list(msg.poses)
 
-        # Find the closest waypoint on the new path to the robot's position.
-        # Skip any waypoints already behind us (within 0.15 m).
+        # ---------------------------------------------------------------
+        # FIX 1: Resume from the first waypoint that is strictly AHEAD of
+        # the robot (not behind or beside it).
+        #
+        # Strategy:
+        #   1. Find the closest waypoint on the new path.
+        #   2. Walk forward from that waypoint until we find one that is
+        #      more than RESUME_LOOKAHEAD metres away — that becomes our
+        #      new start index.  This skips waypoints we've already passed
+        #      AND prevents re-approaching a waypoint right behind us.
+        #   3. If we can't find such a waypoint (robot is near the end of
+        #      the path) just start from the closest one.
+        # ---------------------------------------------------------------
+        RESUME_LOOKAHEAD = 0.20   # metres — must be a bit ahead of us
+
+        # Step 1: Find the globally closest waypoint
         best_idx  = 0
         best_dist = float('inf')
         for i, pose in enumerate(new_path):
@@ -62,8 +76,18 @@ class RobotController(Node):
                 best_dist = d
                 best_idx  = i
 
-        # Only resume ahead of current position if close enough to a waypoint.
-        start_idx = best_idx if (best_dist < 0.30 and best_idx > 0) else 0
+        # Step 2: Walk forward until we find a waypoint further than
+        #         RESUME_LOOKAHEAD from the robot.
+        start_idx = best_idx
+        for i in range(best_idx, len(new_path)):
+            dx = new_path[i].pose.position.x - self.robot_x
+            dy = new_path[i].pose.position.y - self.robot_y
+            if math.sqrt(dx * dx + dy * dy) >= RESUME_LOOKAHEAD:
+                start_idx = i
+                break
+        else:
+            # All remaining waypoints are very close — go to the last one
+            start_idx = len(new_path) - 1
 
         self.path          = new_path
         self.current_idx   = start_idx
@@ -72,7 +96,8 @@ class RobotController(Node):
         self.skip_attempts = 0
         self.get_logger().info(
             f'Updated path received: {len(self.path)} waypoints, '
-            f'resuming from waypoint {self.current_idx}.')
+            f'resuming from waypoint {self.current_idx} '
+            f'(closest was {best_idx}, dist={best_dist:.2f}m).')
 
     def odom_callback(self, msg):
         self.robot_x = msg.pose.pose.position.x
@@ -102,7 +127,7 @@ class RobotController(Node):
 
             # Skip waypoints progressively to escape a stuck situation.
             # After 2 consecutive stuck checks (4 s), skip one waypoint.
-            # After 4 more (8 s), skip two at once. Cap at 5 skips total.
+            # After 4 more (8 s), skip two at once. Cap at 3 skips.
             if self.stuck_counter >= 2:
                 skip = min(1 + (self.skip_attempts // 2), 3)
                 new_idx = self.current_idx + skip
@@ -114,7 +139,6 @@ class RobotController(Node):
                     self.skip_attempts += 1
                     self.stuck_counter  = 0
                 else:
-                    # No more waypoints to skip — stop and wait for replan
                     self.get_logger().warn('No waypoints left to skip.')
                     self.stuck_counter = 0
         else:

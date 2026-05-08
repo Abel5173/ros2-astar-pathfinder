@@ -33,6 +33,14 @@ class DStarLitePlanner(Node):
 
         self.dynamic_obstacles = set()
 
+        # ---------------------------------------------------------------
+        # FIX 2 & 3: Debounce — track how many consecutive scans show the
+        # same dynamic-obstacle set before we act on it.
+        # ---------------------------------------------------------------
+        self._last_dynamic_snapshot = frozenset()
+        self._dynamic_stable_count  = 0
+        self._DEBOUNCE_SCANS        = 3   # require 3 consecutive matching scans
+
         self.path_pub = self.create_publisher(Path,          '/dstar_path',  10)
         self.grid_pub = self.create_publisher(OccupancyGrid, '/dstar_grid',  10)
         self.goal_pub = self.create_publisher(PoseStamped,   '/goal_pose',   10)
@@ -109,9 +117,14 @@ class DStarLitePlanner(Node):
 
     def scan_callback(self, msg):
         """
-        Only register dynamic obstacles for very close hits (< 0.8 m) that
-        are NOT already in the static map.  Only replan when the obstacle
-        change actually intersects the current path.
+        Register dynamic obstacles only for hits that are:
+          1. Very close (< 0.45 m) — FIX 2: tighter range stops wall-edge false
+             positives that caused the 19-step / 26-step oscillation
+          2. NOT already in the static map
+          3. Not the robot's own cell or the goal
+
+        FIX 3: Debounce — only act when the same obstacle set has been
+        seen in 3 consecutive scans, suppressing single-scan flicker.
         """
         new_dynamic = set()
         angle = msg.angle_min
@@ -119,7 +132,8 @@ class DStarLitePlanner(Node):
             angle += msg.angle_increment
             if math.isnan(r) or math.isinf(r):
                 continue
-            if r < msg.range_min or r > 0.8:
+            # FIX 2: reduced from 0.8 m to 0.45 m
+            if r < msg.range_min or r > 0.45:
                 continue
             hit_x = self.robot_x + r * math.cos(self.robot_yaw + angle)
             hit_y = self.robot_y + r * math.sin(self.robot_yaw + angle)
@@ -132,6 +146,20 @@ class DStarLitePlanner(Node):
                 continue
             new_dynamic.add(cell)
 
+        # ---------------------------------------------------------------
+        # FIX 3: Debounce logic
+        # ---------------------------------------------------------------
+        snapshot = frozenset(new_dynamic)
+        if snapshot == self._last_dynamic_snapshot:
+            self._dynamic_stable_count += 1
+        else:
+            self._last_dynamic_snapshot = snapshot
+            self._dynamic_stable_count  = 1
+
+        if self._dynamic_stable_count < self._DEBOUNCE_SCANS:
+            return  # wait for the reading to stabilise
+
+        # Debounce passed — proceed only if something actually changed
         if new_dynamic == self.dynamic_obstacles:
             return
 
@@ -151,12 +179,6 @@ class DStarLitePlanner(Node):
 
     # ------------------------------------------------------------------
     # D* Lite — pure A* fallback (simple, correct, no incremental state)
-    #
-    # D* Lite's incremental machinery is complex and fragile when the
-    # obstacle set changes frequently (LiDAR noise).  Since we already
-    # gate replanning to only path-intersecting changes, a clean A* run
-    # on each replan is fast enough (40×40 grid = 1600 cells) and
-    # completely avoids stale-key / inconsistent-state bugs.
     # ------------------------------------------------------------------
     def _astar(self, start, goal):
         """Standard A* on the current obstacle set."""

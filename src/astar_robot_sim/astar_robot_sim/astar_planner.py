@@ -34,6 +34,14 @@ class AStarPlanner(Node):
         # Dynamic obstacles — only truly new obstacles not in the static map
         self.dynamic_obstacles = set()
 
+        # ---------------------------------------------------------------
+        # FIX 2 & 3: Debounce — track how many consecutive scans show the
+        # same dynamic-obstacle set before we act on it.
+        # ---------------------------------------------------------------
+        self._last_dynamic_snapshot = frozenset()
+        self._dynamic_stable_count  = 0
+        self._DEBOUNCE_SCANS        = 3   # require 3 consecutive matching scans
+
         self.path_pub = self.create_publisher(Path,          '/astar_path',    10)
         self.grid_pub = self.create_publisher(OccupancyGrid, '/occupancy_grid', 10)
         self.goal_pub = self.create_publisher(PoseStamped,   '/goal_pose',      10)
@@ -101,13 +109,14 @@ class AStarPlanner(Node):
 
     def scan_callback(self, msg):
         """
-        Only add dynamic obstacles for objects that are:
-          1. Very close (< 0.8 m) — far hits are just the static walls
+        Register dynamic obstacles only for hits that are:
+          1. Very close (< 0.45 m) — FIX 2: tighter range stops wall-edge false
+             positives that caused the 19-step / 26-step oscillation
           2. NOT already in the static map
-          3. Actually blocking the current planned path
+          3. Not the robot's own cell or the goal
 
-        Only replan when a new obstacle intersects the current path.
-        This prevents constant replanning from LiDAR noise on static walls.
+        FIX 3: Debounce — only act when the same obstacle set has been
+        seen in 3 consecutive scans, suppressing single-scan flicker.
         """
         new_dynamic = set()
 
@@ -116,17 +125,16 @@ class AStarPlanner(Node):
             angle += msg.angle_increment
             if math.isnan(r) or math.isinf(r):
                 continue
-            if r < msg.range_min or r > 0.8:   # only very close hits
+            # FIX 2: reduced from 0.8 m to 0.45 m
+            if r < msg.range_min or r > 0.45:
                 continue
 
             hit_x = self.robot_x + r * math.cos(self.robot_yaw + angle)
             hit_y = self.robot_y + r * math.sin(self.robot_yaw + angle)
             cell  = self.world_to_grid(hit_x, hit_y)
 
-            # Skip static walls — they're already in the map
             if cell in self.static_obstacles:
                 continue
-            # Never block the robot's own cell or the goal
             if self.last_start and cell == self.last_start:
                 continue
             if cell == self.goal:
@@ -134,8 +142,22 @@ class AStarPlanner(Node):
 
             new_dynamic.add(cell)
 
+        # ---------------------------------------------------------------
+        # FIX 3: Debounce logic
+        # ---------------------------------------------------------------
+        snapshot = frozenset(new_dynamic)
+        if snapshot == self._last_dynamic_snapshot:
+            self._dynamic_stable_count += 1
+        else:
+            self._last_dynamic_snapshot = snapshot
+            self._dynamic_stable_count  = 1
+
+        if self._dynamic_stable_count < self._DEBOUNCE_SCANS:
+            return  # wait for the reading to stabilise
+
+        # Debounce passed — proceed only if something actually changed
         if new_dynamic == self.dynamic_obstacles:
-            return  # nothing changed
+            return
 
         # Check if any changed obstacle actually intersects the current path
         path_cells    = set(self.path) if self.path else set()
@@ -150,7 +172,6 @@ class AStarPlanner(Node):
         self.dynamic_obstacles = new_dynamic
         self.obstacles |= self.dynamic_obstacles
 
-        # Only replan if the path is actually affected
         if (path_blocked or path_cleared) and self.last_start is not None:
             self.get_logger().info('Dynamic obstacle changed path — replanning.')
             self._replan(self.last_start, self.goal)
