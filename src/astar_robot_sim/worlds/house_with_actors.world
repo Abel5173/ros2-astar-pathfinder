@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="default">
+
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <scene>
+      <shadows>false</shadows>
+    </scene>
+
+    <gui fullscreen='0'>
+      <camera name='user_camera'>
+        <pose frame=''>0.319654 -0.235002 9.29441 0 1.5138 0.009599</pose>
+        <view_controller>orbit</view_controller>
+        <projection_type>perspective</projection_type>
+      </camera>
+    </gui>
+
+    <physics type="ode">
+      <real_time_update_rate>1000.0</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>150</iters>
+          <sor>1.400000</sor>
+        </solver>
+      </ode>
+    </physics>
+
+    <!-- House structure -->
+    <model name="turtlebot3_house">
+      <static>1</static>
+      <include>
+        <uri>model://turtlebot3_house</uri>
+      </include>
+    </model>
+
+    <!-- ============================================================
+         DYNAMIC OBSTACLE 1
+         Paces north-south along the open corridor between x=-3 and
+         the interior wall at y≈-0.175. Stays well clear of all walls.
+         Speed: ~0.3 m/s (slow walk)
+         ============================================================ -->
+    <actor name="actor_corridor">
+      <pose>-3.0 2.0 0 0 0 0</pose>
+      <skin>
+        <filename>walk.dae</filename>
+        <scale>1.0</scale>
+      </skin>
+      <animation name="walking">
+        <filename>walk.dae</filename>
+        <scale>1.0</scale>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0.0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walking">
+          <!-- north end of corridor -->
+          <waypoint>
+            <time>0.0</time>
+            <pose>-3.0  2.0 0 0 0 -1.5708</pose>
+          </waypoint>
+          <!-- south end — stops before the interior wall at y=-0.175 -->
+          <waypoint>
+            <time>8.0</time>
+            <pose>-3.0  0.5 0 0 0 -1.5708</pose>
+          </waypoint>
+          <!-- back north -->
+          <waypoint>
+            <time>16.0</time>
+            <pose>-3.0  2.0 0 0 0  1.5708</pose>
+          </waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+    <!-- ============================================================
+         DYNAMIC OBSTACLE 2
+         Crosses the main open area east-west.
+         Stays between x=-1 and x=-4, at y=-2.5 (below interior wall).
+         Speed: ~0.3 m/s
+         ============================================================ -->
+    <actor name="actor_hallway">
+      <pose>-1.0 -2.5 0 0 0 0</pose>
+      <skin>
+        <filename>walk.dae</filename>
+        <scale>1.0</scale>
+      </skin>
+      <animation name="walking">
+        <filename>walk.dae</filename>
+        <scale>1.0</scale>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>2.0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walking">
+          <waypoint>
+            <time>0.0</time>
+            <pose>-1.0 -2.5 0 0 0  3.14159</pose>
+          </waypoint>
+          <waypoint>
+            <time>10.0</time>
+            <pose>-4.0 -2.5 0 0 0  3.14159</pose>
+          </waypoint>
+          <waypoint>
+            <time>20.0</time>
+            <pose>-1.0 -2.5 0 0 0  0.0</pose>
+          </waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+  </world>
+</sdf>
